@@ -5,6 +5,7 @@ import type {
   NewBlockEvent,
   NewTransactionEvent,
   OutputAPI,
+  Settled,
 } from "../types"
 
 export default function yourGhHandle(api: API, outputApi: OutputAPI) {
@@ -36,30 +37,92 @@ export default function yourGhHandle(api: API, outputApi: OutputAPI) {
     //     a) pruned, or
     //     b) older than the currently finalized block.
 
-    const onNewBlock = ({ blockHash, parent }: NewBlockEvent) => {
-      // TODO:: implement it
+
+
+
+  const incomingTx: string[] = []
+
+
+  const settledTransactions: Map<string, Map<string, Settled>> = new Map()
+
+
+  const completedTransactions: Set<string> = new Set()
+
+
+  const onNewTx = ({ value: transaction }: NewTransactionEvent) => {
+    incomingTx.push(transaction)
+  }
+
+
+  const onNewBlock = ({ blockHash, parent }: NewBlockEvent) => {
+    const blockTransactions = api.getBody(blockHash)
+
+
+    let blockSettlements = settledTransactions.get(blockHash)
+    if (!blockSettlements) {
+      blockSettlements = new Map<string, Settled>()
+      settledTransactions.set(blockHash, blockSettlements)
     }
 
-    const onNewTx = ({ value: transaction }: NewTransactionEvent) => {
-      // TODO:: implement it
-    }
+const txReadyForSettlement: string[] = []
 
-    const onFinalized = ({ blockHash }: FinalizedEvent) => {
-      // TODO:: implement it
-    }
+for (const tx of incomingTx) {
+  if (blockSettlements!.has(tx)) continue
 
-    return (event: IncomingEvent) => {
-      switch (event.type) {
-        case "newBlock": {
-          onNewBlock(event)
-          break
-        }
-        case "newTransaction": {
-          onNewTx(event)
-          break
-        }
-        case "finalized":
-          onFinalized(event)
+  const isValid = api.isTxValid(blockHash, tx)
+  const isIncluded = blockTransactions.includes(tx)
+
+  if (!isValid || isIncluded) {
+    txReadyForSettlement.push(tx)
+  }
+}
+
+
+  for (const tx of txReadyForSettlement) {
+  const valid = api.isTxValid(blockHash, tx)
+
+  const state: Settled = valid
+    ? { blockHash, type: "valid", successful: api.isTxSuccessful(blockHash, tx) }
+    : { blockHash, type: "invalid" }
+
+  blockSettlements!.set(tx, state)
+  outputApi.onTxSettled(tx, state)
+}
+
+    if (parent) {
+      api.unpin([parent])
+    }
+  }
+
+
+  const onFinalized = ({ blockHash }: FinalizedEvent) => {
+    const blockSettlements = settledTransactions.get(blockHash)
+    if (!blockSettlements) return
+
+
+    for (const [tx, state] of blockSettlements) {
+      if (!completedTransactions.has(tx)) {
+        outputApi.onTxDone(tx, state)
+        completedTransactions.add(tx)
       }
     }
+
+
+    settledTransactions.delete(blockHash)
+    api.unpin([blockHash])
+  }
+
+  return (event: IncomingEvent) => {
+    switch (event.type) {
+      case "newTransaction":
+        onNewTx(event)
+        break
+      case "newBlock":
+        onNewBlock(event)
+        break
+      case "finalized":
+        onFinalized(event)
+        break
+    }
+  }
 }
